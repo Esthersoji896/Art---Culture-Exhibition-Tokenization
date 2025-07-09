@@ -6,7 +6,12 @@
 (define-constant err-listing-exists (err u104))
 (define-constant err-listing-not-found (err u105))
 (define-constant err-price-too-low (err u106))
-
+(define-constant err-invalid-royalty-percentage (err u107))
+(define-constant err-not-curator (err u108))
+(define-constant err-invalid-date-range (err u109))
+(define-constant err-exhibition-not-found (err u110))
+(define-constant err-not-exhibition-curator (err u111))
+(define-constant err-exhibition-not-active (err u112))
 (define-non-fungible-token art-token uint)
 
 (define-map token-metadata
@@ -171,4 +176,193 @@
     (let ((metadata (unwrap! (map-get? token-metadata token-id) err-invalid-token)))
         (ok (is-eq (get authenticity-hash metadata) hash-to-verify))
     )
+)
+(define-map token-royalties
+    uint
+    {
+        artist: principal,
+        percentage: uint,
+    }
+)
+
+(define-constant max-royalty-percentage u1000)
+
+(define-public (set-token-royalty
+        (token-id uint)
+        (artist principal)
+        (percentage uint)
+    )
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (is-some (map-get? token-metadata token-id)) err-invalid-token)
+        (asserts! (<= percentage max-royalty-percentage) (err u107))
+        (map-set token-royalties token-id {
+            artist: artist,
+            percentage: percentage,
+        })
+        (ok true)
+    )
+)
+
+(define-read-only (get-token-royalty (token-id uint))
+    (ok (map-get? token-royalties token-id))
+)
+
+(define-public (buy-token-with-royalty (token-id uint))
+    (let (
+            (listing (unwrap! (map-get? market-listings token-id) err-listing-not-found))
+            (price (get price listing))
+            (seller (get seller listing))
+            (royalty-info (map-get? token-royalties token-id))
+        )
+        (match royalty-info
+            royalty-data (let (
+                    (artist (get artist royalty-data))
+                    (royalty-amount (/ (* price (get percentage royalty-data)) u10000))
+                    (seller-amount (- price royalty-amount))
+                )
+                (try! (stx-transfer? royalty-amount tx-sender artist))
+                (try! (stx-transfer? seller-amount tx-sender seller))
+                (try! (nft-transfer? art-token token-id seller tx-sender))
+                (map-delete market-listings token-id)
+                (ok true)
+            )
+            (begin
+                (try! (stx-transfer? price tx-sender seller))
+                (try! (nft-transfer? art-token token-id seller tx-sender))
+                (map-delete market-listings token-id)
+                (ok true)
+            )
+        )
+    )
+)
+(define-map exhibitions
+    uint
+    {
+        name: (string-ascii 100),
+        description: (string-ascii 500),
+        curator: principal,
+        start-date: uint,
+        end-date: uint,
+        is-active: bool,
+    }
+)
+
+(define-map exhibition-tokens
+    {
+        exhibition-id: uint,
+        token-id: uint,
+    }
+    bool
+)
+
+(define-map curator-permissions
+    principal
+    bool
+)
+
+(define-data-var last-exhibition-id uint u0)
+
+(define-public (add-curator (curator principal))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (map-set curator-permissions curator true)
+        (ok true)
+    )
+)
+
+(define-public (remove-curator (curator principal))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (map-delete curator-permissions curator)
+        (ok true)
+    )
+)
+
+(define-read-only (is-curator (user principal))
+    (default-to false (map-get? curator-permissions user))
+)
+
+(define-public (create-exhibition
+        (name (string-ascii 100))
+        (description (string-ascii 500))
+        (start-date uint)
+        (end-date uint)
+    )
+    (let ((exhibition-id (+ (var-get last-exhibition-id) u1)))
+        (asserts! (is-curator tx-sender) (err u108))
+        (asserts! (> end-date start-date) (err u109))
+        (map-set exhibitions exhibition-id {
+            name: name,
+            description: description,
+            curator: tx-sender,
+            start-date: start-date,
+            end-date: end-date,
+            is-active: true,
+        })
+        (var-set last-exhibition-id exhibition-id)
+        (ok exhibition-id)
+    )
+)
+
+(define-public (add-token-to-exhibition
+        (exhibition-id uint)
+        (token-id uint)
+    )
+    (let ((exhibition (unwrap! (map-get? exhibitions exhibition-id) (err u110))))
+        (asserts! (is-eq tx-sender (get curator exhibition)) (err u111))
+        (asserts! (get is-active exhibition) (err u112))
+        (asserts! (is-some (map-get? token-metadata token-id)) err-invalid-token)
+        (map-set exhibition-tokens {
+            exhibition-id: exhibition-id,
+            token-id: token-id,
+        }
+            true
+        )
+        (ok true)
+    )
+)
+
+(define-public (remove-token-from-exhibition
+        (exhibition-id uint)
+        (token-id uint)
+    )
+    (let ((exhibition (unwrap! (map-get? exhibitions exhibition-id) (err u110))))
+        (asserts! (is-eq tx-sender (get curator exhibition)) (err u111))
+        (map-delete exhibition-tokens {
+            exhibition-id: exhibition-id,
+            token-id: token-id,
+        })
+        (ok true)
+    )
+)
+
+(define-public (close-exhibition (exhibition-id uint))
+    (let ((exhibition (unwrap! (map-get? exhibitions exhibition-id) (err u110))))
+        (asserts! (is-eq tx-sender (get curator exhibition)) (err u111))
+        (map-set exhibitions exhibition-id
+            (merge exhibition { is-active: false })
+        )
+        (ok true)
+    )
+)
+
+(define-read-only (get-exhibition (exhibition-id uint))
+    (ok (map-get? exhibitions exhibition-id))
+)
+
+(define-read-only (is-token-in-exhibition
+        (exhibition-id uint)
+        (token-id uint)
+    )
+    (ok (default-to false
+        (map-get? exhibition-tokens {
+            exhibition-id: exhibition-id,
+            token-id: token-id,
+        })
+    ))
+)
+
+(define-read-only (get-last-exhibition-id)
+    (ok (var-get last-exhibition-id))
 )
