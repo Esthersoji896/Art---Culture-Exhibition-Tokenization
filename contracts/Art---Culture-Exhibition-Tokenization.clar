@@ -396,7 +396,9 @@
             err-not-token-owner
         )
         (asserts! (is-none (map-get? token-auctions token-id)) err-auction-exists)
-        (asserts! (is-none (map-get? market-listings token-id)) err-listing-exists)
+        (asserts! (is-none (map-get? market-listings token-id))
+            err-listing-exists
+        )
         (asserts! (> starting-price u0) err-price-too-low)
         (asserts! (> duration-blocks u0) err-invalid-date-range)
         (map-set token-auctions token-id {
@@ -411,7 +413,10 @@
     )
 )
 
-(define-public (place-bid (token-id uint) (bid-amount uint))
+(define-public (place-bid
+        (token-id uint)
+        (bid-amount uint)
+    )
     (let (
             (auction (unwrap! (map-get? token-auctions token-id) err-auction-not-found))
             (current-bid (get current-bid auction))
