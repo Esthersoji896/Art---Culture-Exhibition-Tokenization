@@ -12,6 +12,12 @@
 (define-constant err-exhibition-not-found (err u110))
 (define-constant err-not-exhibition-curator (err u111))
 (define-constant err-exhibition-not-active (err u112))
+(define-constant err-auction-exists (err u113))
+(define-constant err-auction-not-found (err u114))
+(define-constant err-auction-ended (err u115))
+(define-constant err-auction-not-ended (err u116))
+(define-constant err-bid-too-low (err u117))
+(define-constant err-auction-active (err u118))
 (define-non-fungible-token art-token uint)
 
 (define-map token-metadata
@@ -365,4 +371,121 @@
 
 (define-read-only (get-last-exhibition-id)
     (ok (var-get last-exhibition-id))
+)
+
+(define-map token-auctions
+    uint
+    {
+        seller: principal,
+        starting-price: uint,
+        current-bid: uint,
+        highest-bidder: (optional principal),
+        end-block: uint,
+        reserve-price: uint,
+    }
+)
+
+(define-public (create-auction
+        (token-id uint)
+        (starting-price uint)
+        (duration-blocks uint)
+        (reserve-price uint)
+    )
+    (begin
+        (asserts! (is-eq (some tx-sender) (nft-get-owner? art-token token-id))
+            err-not-token-owner
+        )
+        (asserts! (is-none (map-get? token-auctions token-id)) err-auction-exists)
+        (asserts! (is-none (map-get? market-listings token-id)) err-listing-exists)
+        (asserts! (> starting-price u0) err-price-too-low)
+        (asserts! (> duration-blocks u0) err-invalid-date-range)
+        (map-set token-auctions token-id {
+            seller: tx-sender,
+            starting-price: starting-price,
+            current-bid: starting-price,
+            highest-bidder: none,
+            end-block: (+ stacks-block-height duration-blocks),
+            reserve-price: reserve-price,
+        })
+        (ok true)
+    )
+)
+
+(define-public (place-bid (token-id uint) (bid-amount uint))
+    (let (
+            (auction (unwrap! (map-get? token-auctions token-id) err-auction-not-found))
+            (current-bid (get current-bid auction))
+            (end-block (get end-block auction))
+            (highest-bidder (get highest-bidder auction))
+        )
+        (asserts! (< stacks-block-height end-block) err-auction-ended)
+        (asserts! (> bid-amount current-bid) err-bid-too-low)
+        (match highest-bidder
+            previous-bidder (try! (stx-transfer? current-bid tx-sender previous-bidder))
+            true
+        )
+        (try! (stx-transfer? bid-amount tx-sender (as-contract tx-sender)))
+        (map-set token-auctions token-id
+            (merge auction {
+                current-bid: bid-amount,
+                highest-bidder: (some tx-sender),
+            })
+        )
+        (ok true)
+    )
+)
+
+(define-public (finalize-auction (token-id uint))
+    (let (
+            (auction (unwrap! (map-get? token-auctions token-id) err-auction-not-found))
+            (seller (get seller auction))
+            (current-bid (get current-bid auction))
+            (highest-bidder (get highest-bidder auction))
+            (end-block (get end-block auction))
+            (reserve-price (get reserve-price auction))
+        )
+        (asserts! (< end-block stacks-block-height) err-auction-not-ended)
+        (match highest-bidder
+            winning-bidder (begin
+                (asserts! (>= current-bid reserve-price) err-bid-too-low)
+                (try! (as-contract (stx-transfer? current-bid tx-sender seller)))
+                (try! (nft-transfer? art-token token-id seller winning-bidder))
+                (map-delete token-auctions token-id)
+                (ok true)
+            )
+            (begin
+                (map-delete token-auctions token-id)
+                (ok false)
+            )
+        )
+    )
+)
+
+(define-public (cancel-auction (token-id uint))
+    (let (
+            (auction (unwrap! (map-get? token-auctions token-id) err-auction-not-found))
+            (seller (get seller auction))
+            (highest-bidder (get highest-bidder auction))
+            (current-bid (get current-bid auction))
+        )
+        (asserts! (is-eq tx-sender seller) err-not-token-owner)
+        (asserts! (is-none highest-bidder) err-auction-active)
+        (map-delete token-auctions token-id)
+        (ok true)
+    )
+)
+
+(define-read-only (get-auction (token-id uint))
+    (ok (map-get? token-auctions token-id))
+)
+
+(define-read-only (get-auction-time-remaining (token-id uint))
+    (let ((auction (unwrap! (map-get? token-auctions token-id) err-auction-not-found)))
+        (let ((end-block (get end-block auction)))
+            (ok (if (> end-block stacks-block-height)
+                (- end-block stacks-block-height)
+                u0
+            ))
+        )
+    )
 )
