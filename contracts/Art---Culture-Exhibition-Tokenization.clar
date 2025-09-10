@@ -18,6 +18,13 @@
 (define-constant err-auction-not-ended (err u116))
 (define-constant err-bid-too-low (err u117))
 (define-constant err-auction-active (err u118))
+(define-constant err-token-already-fractionalized (err u119))
+(define-constant err-token-not-fractionalized (err u120))
+(define-constant err-insufficient-shares (err u121))
+(define-constant err-proposal-not-found (err u122))
+(define-constant err-proposal-ended (err u123))
+(define-constant err-already-voted (err u124))
+(define-constant err-proposal-not-approved (err u125))
 (define-non-fungible-token art-token uint)
 
 (define-map token-metadata
@@ -492,5 +499,247 @@
                 u0
             ))
         )
+    )
+)
+
+(define-map token-fractional-info
+    uint
+    {
+        total-shares: uint,
+        is-fractionalized: bool,
+    }
+)
+
+(define-map fractional-ownership
+    {
+        token-id: uint,
+        owner: principal,
+    }
+    uint
+)
+
+(define-map sale-proposals
+    uint
+    {
+        token-id: uint,
+        proposer: principal,
+        sale-price: uint,
+        votes-for: uint,
+        votes-against: uint,
+        end-block: uint,
+        executed: bool,
+    }
+)
+
+(define-map proposal-votes
+    {
+        proposal-id: uint,
+        voter: principal,
+    }
+    bool
+)
+
+(define-data-var last-proposal-id uint u0)
+
+(define-public (fractionalize-token
+        (token-id uint)
+        (total-shares uint)
+    )
+    (begin
+        (asserts! (is-eq (some tx-sender) (nft-get-owner? art-token token-id))
+            err-not-token-owner
+        )
+        (asserts! (is-none (map-get? token-fractional-info token-id))
+            err-token-already-fractionalized
+        )
+        (asserts! (> total-shares u1) err-price-too-low)
+        (map-set token-fractional-info token-id {
+            total-shares: total-shares,
+            is-fractionalized: true,
+        })
+        (map-set fractional-ownership {
+            token-id: token-id,
+            owner: tx-sender,
+        }
+            total-shares
+        )
+        (ok true)
+    )
+)
+
+(define-public (transfer-fractional-shares
+        (token-id uint)
+        (recipient principal)
+        (shares uint)
+    )
+    (let (
+            (fractional-info (unwrap! (map-get? token-fractional-info token-id)
+                err-token-not-fractionalized
+            ))
+            (sender-shares (default-to u0
+                (map-get? fractional-ownership {
+                    token-id: token-id,
+                    owner: tx-sender,
+                })
+            ))
+        )
+        (asserts! (>= sender-shares shares) err-insufficient-shares)
+        (asserts! (> shares u0) err-price-too-low)
+        (map-set fractional-ownership {
+            token-id: token-id,
+            owner: tx-sender,
+        }
+            (- sender-shares shares)
+        )
+        (map-set fractional-ownership {
+            token-id: token-id,
+            owner: recipient,
+        }
+            (+
+                (default-to u0
+                    (map-get? fractional-ownership {
+                        token-id: token-id,
+                        owner: recipient,
+                    })
+                )
+                shares
+            ))
+        (ok true)
+    )
+)
+
+(define-public (propose-sale
+        (token-id uint)
+        (sale-price uint)
+        (voting-duration uint)
+    )
+    (let (
+            (proposal-id (+ (var-get last-proposal-id) u1))
+            (fractional-info (unwrap! (map-get? token-fractional-info token-id)
+                err-token-not-fractionalized
+            ))
+            (proposer-shares (default-to u0
+                (map-get? fractional-ownership {
+                    token-id: token-id,
+                    owner: tx-sender,
+                })
+            ))
+        )
+        (asserts! (> proposer-shares u0) err-insufficient-shares)
+        (asserts! (> sale-price u0) err-price-too-low)
+        (map-set sale-proposals proposal-id {
+            token-id: token-id,
+            proposer: tx-sender,
+            sale-price: sale-price,
+            votes-for: u0,
+            votes-against: u0,
+            end-block: (+ stacks-block-height voting-duration),
+            executed: false,
+        })
+        (var-set last-proposal-id proposal-id)
+        (ok proposal-id)
+    )
+)
+
+(define-public (vote-on-proposal
+        (proposal-id uint)
+        (vote-for bool)
+    )
+    (let (
+            (proposal (unwrap! (map-get? sale-proposals proposal-id) err-proposal-not-found))
+            (token-id (get token-id proposal))
+            (voter-shares (default-to u0
+                (map-get? fractional-ownership {
+                    token-id: token-id,
+                    owner: tx-sender,
+                })
+            ))
+        )
+        (asserts! (> voter-shares u0) err-insufficient-shares)
+        (asserts! (< stacks-block-height (get end-block proposal))
+            err-proposal-ended
+        )
+        (asserts!
+            (is-none (map-get? proposal-votes {
+                proposal-id: proposal-id,
+                voter: tx-sender,
+            }))
+            err-already-voted
+        )
+        (map-set proposal-votes {
+            proposal-id: proposal-id,
+            voter: tx-sender,
+        }
+            true
+        )
+        (if vote-for
+            (map-set sale-proposals proposal-id
+                (merge proposal { votes-for: (+ (get votes-for proposal) voter-shares) })
+            )
+            (map-set sale-proposals proposal-id
+                (merge proposal { votes-against: (+ (get votes-against proposal) voter-shares) })
+            )
+        )
+        (ok true)
+    )
+)
+
+(define-public (execute-sale-proposal (proposal-id uint))
+    (let (
+            (proposal (unwrap! (map-get? sale-proposals proposal-id) err-proposal-not-found))
+            (token-id (get token-id proposal))
+            (fractional-info (unwrap! (map-get? token-fractional-info token-id)
+                err-token-not-fractionalized
+            ))
+            (total-shares (get total-shares fractional-info))
+            (majority-threshold (/ total-shares u2))
+        )
+        (asserts! (> stacks-block-height (get end-block proposal))
+            err-proposal-ended
+        )
+        (asserts! (not (get executed proposal)) err-proposal-not-found)
+        (asserts! (> (get votes-for proposal) majority-threshold)
+            err-proposal-not-approved
+        )
+        (try! (nft-transfer? art-token token-id (as-contract tx-sender) tx-sender))
+        (map-set sale-proposals proposal-id (merge proposal { executed: true }))
+        (ok true)
+    )
+)
+
+(define-read-only (get-fractional-info (token-id uint))
+    (ok (map-get? token-fractional-info token-id))
+)
+
+(define-read-only (get-fractional-ownership
+        (token-id uint)
+        (owner principal)
+    )
+    (ok (map-get? fractional-ownership {
+        token-id: token-id,
+        owner: owner,
+    }))
+)
+
+(define-read-only (get-sale-proposal (proposal-id uint))
+    (ok (map-get? sale-proposals proposal-id))
+)
+
+(define-read-only (get-ownership-percentage
+        (token-id uint)
+        (owner principal)
+    )
+    (let (
+            (fractional-info (unwrap! (map-get? token-fractional-info token-id)
+                err-token-not-fractionalized
+            ))
+            (owner-shares (default-to u0
+                (map-get? fractional-ownership {
+                    token-id: token-id,
+                    owner: owner,
+                })
+            ))
+        )
+        (ok (* (/ owner-shares (get total-shares fractional-info)) u10000))
     )
 )
