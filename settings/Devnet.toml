@@ -1,0 +1,20 @@
+[network]
+name = "devnet"
+deployment_fee_rate = 10
+
+[accounts.deployer]
+mnemonic = "test test test test test test test test test test test junk"
+
+[devnet]
+disable_stacks_api = false
+disable_stacks_explorer = false
+disable_bitcoin_explorer = false
+working_dir = "tmp/devnet"
+
+[[devnet.miner.mining_key]]
+mnemonic = "test test test test test test test test test test test junk"
+
+[devnet.miner]
+mine_microblocks = true
+microblock_time = 30000
+wait_time_for_microblocks = 10000
